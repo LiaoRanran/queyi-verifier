@@ -1,0 +1,21 @@
+# queyi-verifier 配置（657 A 段：仓库拆分）
+#
+# 本仓库是「阙疑验证器」的独立家。它从 CPP-Bible 拆出 tools/ tests/ web/ docs/，
+# 但**数据与卡片源留在 CPP-Bible**（A1 划分边界），故数据/卡片路径在此可配置。
+#
+# 本地可运行性验证（A3）用的默认值是 CPP-Bible 的绝对路径（本机）。
+# 换机器 / CI 时改这两个值即可，无需改代码。
+#
+# 注意：tools/ 当前仍按 `ROOT/<dir>` 解析路径（ROOT = 本仓库根）。
+# 本仓库用 **junction/symlink** 把 data/ 与 atoms/ 指到下面的路径，借此实现
+# 「路径可配置」而不必改每个工具的路径逻辑（生产化再把 tools 改为读本文件的
+# data_path/atoms_path，列为后续 TODO，见 README）。
+
+data_path  = "C:/CodeLearnling/note/note/C++/CPP-Bible/data"
+atoms_path = "C:/CodeLearnling/note/note/C++/CPP-Bible/atoms"
+
+# 可选：验证器自身跑出来的报告写哪（默认本仓库 data/，已被 junction 指到 CPP-Bible/data）
+# report_path = "C:/CodeLearnling/queyi-verifier/data"
+
+# 门禁：复跑 CPP-Bible 那套门禁（run_656_gate.py 已在 tools/ 内）
+#   python tools/run_656_gate.py --fast-only

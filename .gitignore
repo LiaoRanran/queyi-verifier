@@ -1,0 +1,139 @@
+# 临时/调试目录（下划线开头惯例，不入库）
+_asm_demo/
+_emp_bench/
+# 373 独立对抗渗透沙箱（攻击脚本/陷阱/交付物草稿；373 §0.4 前置条件）
+# 攻击者据此可放心造陷阱：目录不出现在 git status；交付物由建设者事后收编
+_adversarial/
+
+# 发布管线构建产物（可由 tools/ 重生成，不入库）
+build/
+site_out/
+现代C++终极圣经.pdf
+*.pdf
+# pandoc 导出产物（可由 tools/ 重生成，不入库）
+Book.zip
+
+# 清理战役备份（一次性，可删）
+*.bak
+*.preclean.bak
+
+# 编译校验临时产物
+*.exe
+*.o
+*.obj
+# 仅根目录：compile_all/chapter_compile_check 漏回根目录的 .cpp（不伤 Examples/ 真实源）
+# 注意：.gitignore 不支持行内注释，注释必须独占一行，否则整条规则失效
+/*.cpp
+# 例外：库根 D5 基准源码须跟踪（覆盖上面 /*.cpp，修复新建 bench 被静默忽略的脚枪）
+!_bench_d5_*.cpp
+_probe*.cpp
+_tu_*.cpp
+_repro.py
+# 分诊/扫描临时脚本与 dump 的 TU（triage2 / dumpblocks / allfails 等）
+_rw_tmp/
+# 中文提交信息临时文件（git commit -F 用，用完即删）
+_commitmsg.txt
+
+# 根目录调试/编译副产物（应只写 build/，见 tools/clean_root_artifacts.py）
+# 这些目录/文件是 ch148/149/150/151/161 调试与 benchmark 的泄漏产物，违反
+# AGENT.md「源只读、只写 build/」红线。已移至 build/_root_artifacts/（可逆）。
+_run/
+_run_ch161/
+_tcf/
+gcm.cache/
+ch148/
+ch148_forensics/
+ch149_out/
+*.log
+ac_verify.py
+ac_verify.log
+_g.py
+_one.py
+_two.py
+# mdBook 配置；本项目交付物为 MkDocs（CI 用 mkdocs build --strict），book.toml 为废弃实验遗留
+book.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+_book_asm_freshness.json
+*.egg-info/
+dist/
+.pytest_cache/
+# 559 Part C：pytest 临时基目录移入仓内（pyproject 的 addopts `--basetemp=.pytest_tmp`）。
+# 放仓内是为了绕开系统 %TEMP% 的 safe-delete 批量闸（实测收尾删 1053 个文件被拦 ⇒ 卡很久）。
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 本地 Agent / 工具状态（非内容，不入版本库）
+.workbuddy/
+# 任务状态文件（494 任务 7 / 492 §4：断点续跑的运行时状态，不入库）
+/data/tasks/
+# 结构化操作日志（498 任务 4 / 497：trace JSONL，运行时数据不入库）
+/data/traces/
+/data/logs/
+# 508 任务5：知识图谱是派生物（knowledge_graph.py build 可重建）
+/data/knowledge_graph.db*
+# 565 Part 3：命题状态图也是派生物（prop_graph.py build 可重建；与 knowledge_graph 分库）
+/data/propositions.db*
+# 508 任务6：度量是时间序列（运行时数据，不入库）
+/data/metrics.jsonl
+# 508 任务7：备份是本地安全网（不入库）
+/data/backups/
+# 508 任务6：pytest 墙钟落盘（metrics_collector 的 pytest_wall_seconds 来源）
+/data/pytest_last.txt
+# 557 Part A：人审分桶报告（运行时派生物，含全量 Finding 明细的大 JSON，不入库）
+/data/review/
+
+# 审计/软门禁临时输出（dangling_ref_linter / prereq_topo_check 等）
+outputs/
+
+# compile_all R2 局部扫描/按章缓存临时产物（不入库）
+tools/.compile_report_partial.json
+tools/.compile_cache.json
+
+# 外部参考范式手册（本机参考，未随仓库推送）
+docs/references/external/
+
+# 独立对抗沙箱（不入库）
+_adv_v61/
+_adv_v70/
+_bypass_test/
+
+# local secrets (never commit)
+.env
+# 628 B2：VSA HMAC 密钥（他验凭证签名密钥，绝不入库）
+# 633 C1 加宽（632 G1 发现过窄）：覆盖密钥及其备份/变体，以及 data/vsa/ 下任意 .key
+data/vsa_secret.key
+data/vsa_secret.key*
+data/vsa/*.key
+data/vsa/*.key*
+
+# observability trace logs (large JSONL, archived but not tracked)
+_archive/observability_logs/
+
+# 自动化协议目录（状态/提示词/临时脚本，运行时数据不入库）
+_auto/
+# cProfile 性能剖析输出（临时文件，不入库）
+data/profiles/
+# Trae 调研进行中（完成后再入库）
+_arch_v18/
+
+# Node 依赖（657 D7：jsdom 等装到仓库根 node_modules，体积大且可重装；
+# 版本由 package.json / package-lock.json 钉定，二者入库）
+node_modules/
+
+# 657 A 段：data/ 与 atoms/ 是 junction/symlink → CPP-Bible（不入库，路径由 queyi.toml 配置）
+data/
+atoms/
+__pycache__/
+*.pyc
+.pytest_cache/

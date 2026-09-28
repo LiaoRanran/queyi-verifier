@@ -1,0 +1,116 @@
+# serializer version: 1
+# name: test_gate_summary_counts
+  dict({
+    'advice': 5,
+    'block': 0,
+    'rules': 67,
+    'warn': 116,
+  })
+# ---
+# name: test_kg_stats_counts
+  dict({
+    'card_nodes': 165,
+    'concept_edges': 79,
+    'concepts': 131,
+    'concepts_multi_atom': 0,
+    'dangling': 3,
+    'edges': 291,
+    'edges_by_type': dict({
+      'ASSERTS': 60,
+      'CONTRADICTS': 1,
+      'CONTRASTS': 22,
+      'PREREQUISITE': 27,
+      'REFERENCES': 67,
+      'SERVES': 58,
+      'USES': 56,
+    }),
+    'max_component': 5,
+    'nodes': 332,
+    'nodes_by_type': dict({
+      'ARTIFACT': 51,
+      'ATOM': 30,
+      'EVIDENCE': 56,
+      'FIXTURE': 49,
+      'MISCONCEPTION': 79,
+      'RULE': 67,
+    }),
+  })
+# ---
+# name: test_mutation_summary_structure
+  dict({
+    'blocked': 4,
+    'by_operator': dict({
+      'M4': dict({
+        'blocked': 4,
+        'equivalent_invalid': 0,
+        'escaped': 0,
+        'n_a': 0,
+      }),
+      'M5': dict({
+        'blocked': 0,
+        'equivalent_invalid': 0,
+        'escaped': 0,
+        'n_a': 1,
+      }),
+    }),
+    'escaped': 0,
+    'n_a': 1,
+    'strict_blocked': 4,
+    'strict_rate': 1.0,
+    'treated_rate': 1.0,
+    'variants': 5,
+  })
+# ---
+# name: test_poison_rule_coverage_live
+  dict({
+    'attack_taxonomy': list([
+      'A1',
+      'A2',
+      'A3',
+      'A4',
+      'A5',
+      'A6',
+      'A7',
+      'A8',
+      'A9',
+      'A10',
+      'A11',
+    ]),
+    'covered': 39,
+    'total': 67,
+    'uncovered': list([
+    ]),
+  })
+# ---
+# name: test_poison_surface_map_committed
+  dict({
+    'attack_type_counts': dict({
+      'A1': 19,
+      'A10': 4,
+      'A11': 2,
+      'A2': 16,
+      'A3': 21,
+      'A4': 4,
+      'A5': 2,
+      'A6': 7,
+      'A7': 5,
+      'A8': 2,
+      'A9': 1,
+    }),
+    'coverage': dict({
+      'covered': 11,
+      'total': 11,
+      'uncovered': list([
+      ]),
+    }),
+    'drill': dict({
+      'passed': 124,
+      'total': 124,
+    }),
+    'rule_coverage': dict({
+      'covered': 39,
+      'exempt': 27,
+      'total': 63,
+    }),
+  })
+# ---
