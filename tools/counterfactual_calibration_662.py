@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 LiaoRanran (阿信)
 """counterfactual_calibration_662.py — 662 B3：反事实引文算子校准。
 
 现状：算子 `tools/counterfactual_citation_658.py` 用 token 重叠≥0.3 或显式引用 id 判 dependent。

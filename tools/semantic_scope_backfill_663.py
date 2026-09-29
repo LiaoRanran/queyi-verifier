@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 LiaoRanran (阿信)
 r"""semantic_scope_backfill_663.py — 663 C1：给 26 张 verified 卡补 semantic scope。
 
 红线：**只加 frontmatter 字段，不改正文**。插入点 = `status:` 行之后。

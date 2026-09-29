@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 LiaoRanran (阿信)
 """independent_generation_664.py — 664 B2：独立生成 A/B/C 跑一轮。
 
 角色（同一批次内分离，避免"生成者即验证者"的知情偏差）：
