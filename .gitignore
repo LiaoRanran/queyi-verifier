@@ -148,4 +148,11 @@ __pycache__/
 /research/
 /docs/
 /goldens/
-/Examples/atoms/
+# 666 双仓复核：`Examples/` 由 `/Examples/atoms/` 放宽到整个目录。
+# 病：657 拆出的 `Examples/` 只是**部分副本**（30 个改名产物 + atoms 联结），
+# 在 verifier 侧是**未跟踪目录** ⇒ run_621/618/619/629 四条"受控目录零污染"
+# 门禁把 `?? Examples/` 判成污染（假红）；Merkle 层也因此量到 177 而非 1571 文件。
+# 治法同其余语料目录：整目录联结回 CPP-Bible，路径进 ignore（机器布局不入库）。
+/Examples/
+# 666 A1：D5 基准源归档（126 个 _bench_d5_*.cpp）同样是语料，联结复用。
+/_archive/benchmarks/

@@ -34,6 +34,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CPP = Path(r"C:\CodeLearnling\note\note\C++\CPP-Bible")
 
 #: (verifier 侧相对路径, CPP-Bible 侧相对路径)
+#: 666 双仓复核增补两项：
+#:   * `Examples`（整目录）：原先只联结 `Examples/atoms`，导致部分副本目录未跟踪、
+#:     四条"受控目录零污染"门禁假红 + Merkle 量错目录（见 .gitignore 注释）；
+#:   * `_archive/benchmarks`：D5 基准源归档（126 个 `_bench_d5_*.cpp`），
+#:     613 的路径解析契约要求它们在库内可解析（缺它 ⇒ 6 条 D5 测试红）。
 LINKS = [
     ("atoms", "atoms"),
     ("data", "data"),
@@ -43,7 +48,8 @@ LINKS = [
     ("research", "research"),
     ("docs", "docs"),
     ("goldens", "goldens"),
-    ("Examples/atoms", "Examples/atoms"),
+    ("Examples", "Examples"),
+    ("_archive/benchmarks", "_archive/benchmarks"),
 ]
 
 IGNORE_BLOCK = """
