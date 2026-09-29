@@ -137,3 +137,15 @@ atoms/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# ── 665 A1：语料联结（junction → CPP-Bible）─────────────────────────────────
+# 这些是**机器布局**：真实内容在 CPP-Bible 仓，verifier 通过联结复用同一份真相。
+# 不进版本库（否则要么复制 3.4 GB，要么提交 symlink 条目，两者都更糟）。
+# 重建命令：python tools/setup_corpus_links_665.py --apply
+/evidence/
+/misconceptions/
+/Book/
+/research/
+/docs/
+/goldens/
+/Examples/atoms/

@@ -1,0 +1,897 @@
+﻿name: CPP-Bible CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 同一 ref 上多次 push 时取消在跑的旧 run（省 runner 分钟，避免结果互相覆盖）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    # 621 B3：并发安全 —— quality 的「Worktree Cleanliness」步骤执行
+    # `git status --porcelain -- Examples/atoms/ atoms/ evidence/ …`，
+    # 即**读**共享资源 Examples/atoms/；而 replay 会重写该目录。二者并行时该步骤可能
+    # 读到「删旧未写新」的中间态 ⇒ 误判"工作树不干净"而假红（与 619 BLOCK 误报同构）。
+    # 故 quality 也须等 replay 完成。方向同样是「写者(replay)先、读者(quality)后」。
+    # 代价：quality 不再与 replay 并行，整体 wall 增加约一个 replay 时长 —— 用时间换正确性。
+    needs: [replay]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # 防止门禁挂死占满 runner（quality 正常 <5min）
+    strategy:
+      fail-fast: false   # 508 任务2：matrix 任一组合失败不取消其它组合
+      matrix:
+        python-version: ['3.11']
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0   # 增量门禁需完整 git 历史（--changed 用 HEAD~1..HEAD）
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install gate/quality tool dependencies (pyyaml / hypothesis)
+      # gate_engine.py 等门禁工具顶层 import yaml；ubuntu-latest 裸 python3 不含 pyyaml，
+      # 会致门禁 ModuleNotFoundError 静默 exit 1（#624 gate job 仍红根因之一）。
+      # 显式安装，与 pytest job 口径一致，避免依赖系统预装。
+      run: python3 -m pip install --quiet pyyaml hypothesis
+      continue-on-error: false
+
+    - name: Ruff (tools/ 静态检查硬门禁)
+      # P0-2 收口（TOOLCHAIN_UPGRADE_NEXT.md §2）：tools/ 的 ruff 债务已人工清零
+      # （E741×34 / E701×27 / E702×21 / F841×17，逐个确认语义后修改，未用
+      # --unsafe-fixes 批量糊）。此处固化为硬门禁，防止债务再次累积。
+      # 版本钉定 0.6.9（与 .pre-commit-config.yaml 一致）：ruff 规则集会随版本
+      # 漂移，跟随最新版会让「已清零」的基线失效。
+      run: |
+        python3 -m pip install --quiet "ruff==0.6.9"
+        ruff check tools/
+      continue-on-error: false
+
+    - name: Mypy (tools/ 类型检查硬门禁)
+      # P0-2 收口（TOOLCHAIN_UPGRADE_NEXT.md §2）：2026-09-01 完成 tools/ 的
+      # 类型标注 triage（60 错误 → 0，覆盖 110 文件，含 tools/legacy/），
+      # 全部为真实债务修复（纯注解 / .group() 判空 / 返回类型 / 文件句柄遮蔽重命名），
+      # 无 # noqa 豁免。此处固化为硬门禁，防止类型债务再次累积。
+      # 版本钉定 2.3.1：mypy 报错项会随版本漂移，跟最新版会让「已清零」基线失效。
+      # 配置走 pyproject [tool.mypy]（python_version=3.11 / warn_return_any /
+      # warn_unused_configs）；CI 跑在 Linux，tools/ 无 Windows-only 标准库导入，
+      # 与本机 Windows 解析一致。
+      run: |
+        # Ubuntu-latest 2026+ 为 PEP-668 externally-managed，--break-system-packages 兜底；
+        # 失败时把报错写入 GITHUB_STEP_SUMMARY（可经 check-runs API 读取，绕过日志 admin 限制）
+        python3 -m pip install --break-system-packages --quiet "mypy==2.3.1" ||
+          python3 -m pip install --quiet "mypy==2.3.1"
+        mypy tools/ || {
+          {
+            mypy tools/ || true
+          } | tee "$GITHUB_STEP_SUMMARY"
+          exit 1
+        }
+      continue-on-error: false
+
+    - name: Metrics Single-Source-of-Truth Gate (文档数字 vs 事实源)
+      # P1（TOOLCHAIN_UPGRADE_NEXT.md §4）：事实源（Book/ 实时扫描 +
+      # tools/compile_report.json + git）与各文档里的写死数字必须对得上。
+      # 上线时实测已漂移 3 处：README 的 cpp 块 7530（实 7523）、自包含章数
+      # 112（实 114）、STATE.json 的 last_commit 停在 4c5cb32（落后 HEAD
+      # 24 个提交）——这正是「建了事实源但文档仍在手写数字」的典型后果。
+      # 散文文档只校验不改写（数字嵌在叙述里，程序改写会破坏语义），漂移即
+      # BLOCK 并报出 文件:行号；STATE.json 的派生字段用 --sync 回写。
+      run: python3 tools/gen_metrics.py --check
+      continue-on-error: false
+
+    - name: Star / H2 Audit (示例头星级格 + H2 基线防恶化)
+      # 星级规范：示例头统一 span badge 5 格制（方括号风格 842 处已归一，回潮即红）；
+      # 练习标题实心个数制（1..5，不含 ☆）；围栏 title 星级与同号头行一致。
+      # H2：h2_state.json 冻结 147 章基线，仅拦截「数量增加（恶化）」，
+      # 内容级主线/扩展分层重构由写作波次推进（改善后 h2-sync 更新基线）。
+      # 注意：tools/structure_audit.py 是另一套既有门禁（stray H1/跳级/参差表格），
+      # 由本 job 的 Structure 项调用，勿与之混淆或覆盖。
+      run: |
+        python3 tools/star_h2_audit.py check --star
+        python3 tools/star_h2_audit.py h2-check
+      continue-on-error: false
+
+    - name: Atom Coverage Map Gate (16 域覆盖率 + 知识地图数字勾稽)
+      # --check：147 章全部落域（未映射即红）；--check-doc：知识地图域表逐格 vs 实算，
+      # 防"手抄数字漂移"（2026-09-10 监工验收抓到合计行 148 vs 实算 139 后固化为门禁）。
+      run: python3 tools/atom_coverage_map.py --check --check-doc
+      continue-on-error: false
+
+    # 508 任务2：Evidence Replay 已**迁出**为独立并行 job `replay`（见文件下方 jobs）。
+    # 迁出原因：它是 quality job 里最重的一步之一，且与其余 35 步无数据依赖——并行后
+    # quality 的 wall 直接减掉这一步；失败可读性的 error 注解机制原样保留在 replay job 内。
+
+    - name: Worktree Cleanliness (受控目录被工具改写即红 · 369 P1-3)
+      # 为什么：replay 会重编译夹具并可能改写 Examples/*.asm（正常应自动 restore）；
+      # restore 失败或工具异常会留下"被改写的工件"而无人察觉——下一次 replay 即以它为基准，
+      # 形成慢性漂移。故在 replay 步**之后**立刻校验受控目录的清洁性。
+      # 路径白名单：仅 Examples/atoms/ atoms/ evidence/ + tools/golden_state.json；
+      # build/ 等 ignore 产物、References/ 等文档目录不在其列（避免误伤）。
+      # 为何用 Examples/atoms/ 而非整个 Examples/（369 实测对任务书字面的收窄）：Examples/ 根下
+      # 是 Book 章节示例（实测 437 个 .cpp 有历史行尾漂移：工作树 CRLF vs 索引 LF，非本批产物；
+      # Windows git 因 stat 缓存不可见、WSL git 可见）——全目录检查会让 WSL 本地预检恒红，
+      # 使门禁沦为"狼来了"。而 replay 等工具**只写 Examples/atoms/**，收窄不损失判别力。
+      run: |
+        dirty="$(git status --porcelain -- Examples/atoms/ atoms/ evidence/ tools/golden_state.json)"
+        if [ -n "$dirty" ]; then
+          echo "::error::受控目录工作树不干净——工具改写了受控文件而未被提交或还原"
+          printf '%s\n' "$dirty"
+          exit 1
+        fi
+        echo "OK: 受控目录工作树干净（Examples/ atoms/ evidence/ tools/golden_state.json）"
+      continue-on-error: false
+
+    # 508 任务2：Gate Engine + S1-S6 Controls（黄金锁/债务台账/毒样例）已**迁出**为
+    # 独立并行 job `gate`（见文件下方 jobs）。迁出的是"卡层/规则层"门禁，与 quality
+    # 其余步骤（文档/结构/引用层）无数据依赖。
+
+    - name: Cross-check Matrix (求值顺序 unspecified + auto_ptr 演化：GCC/Clang 对照留痕)
+      # 只留痕、不判"顺序"红绿：unspecified 的两种求值顺序都合法，机器不能断言"必须右→左"。
+      # 编译失败仍会红（夹具必须在两编译器下都可编）。MSVC 无路径，按 M2 §2 永久边界以标准条文代替。
+      # 结果同时输出为 ::notice:: 注解：本仓 job 日志需 admin 权限（API 403），而注解可经
+      # check-runs /annotations 公开读取——G4 样板 B 的"Clang 列实测留痕"（M2 §2 双编译器边界）
+      # 依赖这里，否则无权限者无法复核 Clang 侧是否真的跑了。
+      run: |
+        echo "== GCC =="
+        g++ -std=c++17 -O2 Examples/atoms/_atom_eval_order.cpp -o /tmp/gz_gcc && /tmp/gz_gcc > /tmp/gz_gcc.txt 2>&1
+        cat /tmp/gz_gcc.txt
+        echo "::notice::Gray-zone GCC 求值顺序 = $(tr '\n' '/' < /tmp/gz_gcc.txt) [$(g++ --version | head -1)]"
+        echo "== Clang =="
+        if command -v clang++ >/dev/null 2>&1; then
+          clang++ --version | head -1
+          clang++ -std=c++17 -O2 Examples/atoms/_atom_eval_order.cpp -o /tmp/gz_clang && /tmp/gz_clang > /tmp/gz_clang.txt 2>&1
+          cat /tmp/gz_clang.txt
+          echo "::notice::Gray-zone Clang 求值顺序 = $(tr '\n' '/' < /tmp/gz_clang.txt) [$(clang++ --version | head -1)]"
+        else
+          echo "clang++ N/A on this runner"
+          echo "::warning::runner 无 clang++ → 样板 B 的 Clang 列须降级为'标准条文代替'并标'部分达成'"
+        fi
+        # 演化类夹具（样板 C）：auto_ptr 已从标准移除，钉 -std=c++14；Clang 侧失败不阻塞
+        # （降级为"标准条文代替 + 部分达成"），但必须留下 warning 以便后续补实测。
+        echo "== Evolution: auto_ptr =="
+        g++ -std=c++14 -Wno-deprecated-declarations -O2 Examples/atoms/_atom_auto_ptr.cpp -o /tmp/ev_gcc && /tmp/ev_gcc > /tmp/ev_gcc.txt 2>&1
+        cat /tmp/ev_gcc.txt
+        echo "::notice::Evolution GCC auto_ptr = $(tr '\n' '/' < /tmp/ev_gcc.txt) [$(g++ --version | head -1)]"
+        if command -v clang++ >/dev/null 2>&1; then
+          if clang++ -std=c++14 -Wno-deprecated-declarations -O2 Examples/atoms/_atom_auto_ptr.cpp -o /tmp/ev_clang > /tmp/ev_clang.txt 2>&1; then
+            /tmp/ev_clang > /tmp/ev_clang_run.txt 2>&1
+            cat /tmp/ev_clang_run.txt
+            echo "::notice::Evolution Clang auto_ptr = $(tr '\n' '/' < /tmp/ev_clang_run.txt) [$(clang++ --version | head -1)]"
+          else
+            echo "::warning::Clang 下 auto_ptr 夹具编译失败（部分达成）→ 样板 C 的 Clang 列降级为标准条文代替；编译输出：$(head -c 400 /tmp/ev_clang.txt | tr '\n' '/')"
+          fi
+        fi
+        # G5 首个原子（ATOM-MEM-RVREF-001）：具名右值引用是左值 + return 隐式移动的版本边界。
+        # 两只夹具都是纯语言行为（无平台 API），Clang 侧预期与 GCC 逐字一致（M2 §2 双编译器边界）。
+        echo "== Pitfall: named-rvalue-ref =="
+        g++ -std=c++17 -O2 Examples/atoms/_atom_named_rvalue.cpp -o /tmp/rv_gcc && /tmp/rv_gcc > /tmp/rv_gcc.txt 2>&1
+        cat /tmp/rv_gcc.txt
+        echo "::notice::RVREF GCC 具名右值引用 = $(tr '\n' '/' < /tmp/rv_gcc.txt) [$(g++ --version | head -1)]"
+        g++ -std=c++17 -O2 Examples/atoms/_atom_rvref_return.cpp -o /tmp/rvr_gcc && /tmp/rvr_gcc > /tmp/rvr_gcc.txt 2>&1
+        cat /tmp/rvr_gcc.txt
+        echo "::notice::RVREF-RET GCC return 边界 = $(tr '\n' '/' < /tmp/rvr_gcc.txt) [$(g++ --version | head -1)]"
+        if command -v clang++ >/dev/null 2>&1; then
+          clang++ -std=c++17 -O2 Examples/atoms/_atom_named_rvalue.cpp -o /tmp/rv_clang && /tmp/rv_clang > /tmp/rv_clang.txt 2>&1
+          cat /tmp/rv_clang.txt
+          echo "::notice::RVREF Clang 具名右值引用 = $(tr '\n' '/' < /tmp/rv_clang.txt) [$(clang++ --version | head -1)]"
+          clang++ -std=c++17 -O2 Examples/atoms/_atom_rvref_return.cpp -o /tmp/rvr_clang && /tmp/rvr_clang > /tmp/rvr_clang.txt 2>&1
+          cat /tmp/rvr_clang.txt
+          echo "::notice::RVREF-RET Clang return 边界 = $(tr '\n' '/' < /tmp/rvr_clang.txt) [$(clang++ --version | head -1)]"
+        else
+          echo "::warning::runner 无 clang++ → G5 原子 RVREF 的 Clang 列须降级为'标准条文代替'并标'部分达成'"
+        fi
+      continue-on-error: false
+
+    # 508 任务2：Pytest 已**迁出**为独立并行 job `pytest`（见文件下方 jobs），
+    # 且改走 xdist 并行（`-n 16 --maxfail=1`）。迁出后 quality job 不再安装 pytest，
+    # 节省它的 setup 时间；pytest 的失败注解机制原样保留在新 job 内。
+
+    - name: Preflight (LaTeX 致命反斜杠扫描，错误左移)
+      # 纯 Python 零依赖，秒级扫描全书标题/表格/正文里 fenced code 之外的
+      # 裸反斜杠序列（如 '\n'），这类字符会让 pdf job 的 xelatex 报
+      # "Undefined control sequence" 并整本中断 (exit 43)。放在最快的 quality
+      # job 首位，push 后 <10s 即可失败，无需等到耗时的 pdf 阶段才发现。
+      run: python3 tools/preflight_check.py
+      continue-on-error: false
+
+    - name: Consistency Check
+      run: python3 tools/consistency_check.py
+      continue-on-error: false
+
+    - name: Data Sanity Audit (十六进制污染门禁，HEX_QUANTITY 零误报)
+      # 2026-09-02 三轮 L2 深耕沉淀的工具：量级描述误用十六进制（`0x0040` 字节、
+      # `0x0100` KB 等）是批量生成流程的高频错误，已人工修复 26 处并复扫清零。
+      # HEX_QUANTITY 经 ABI 语境豁免（偏移/对齐/vptr/槽位/标签/哨兵/掩码/长地址），
+      # 零误报，故以 --fail-on ERROR 接入门禁，防止同类错误被未来编辑重新引入。
+      # PERF_CONFLICT / UNANCHORED_EVIDENCE 为 WARN 级（误报率较高或需语义判定），
+      # 不进 CI，仅作离线人工复核线索。
+      run: python3 tools/data_sanity_audit.py --fail-on ERROR
+      continue-on-error: false
+
+    - name: Cross-Reference Audit
+      run: python3 tools/crossref_audit.py
+      continue-on-error: false
+
+    - name: Xref Gate (交叉引用完整性 + 孤儿/孤岛)
+      # 与 crossref_audit 互补：crossref_audit 看 part 级覆盖度；xref_check
+      # 校验全部可导航引用（Markdown [..](..) + ⟶ 箭头式）的目标存在性，
+      # 断裂链接 (指向不存在的 .md) 即 BLOCK（退出码 1，本 job 失败），
+      # 孤儿章(零入链)/信息孤岛(零出链) 仅 WARN 不阻断。
+      run: python3 tools/xref_check.py
+      continue-on-error: false
+
+    - name: Index Freshness (SUMMARY/GLOSSARY/PREREQUISITES 与章节同步)
+      # 三份索引由 gen_indexes.py 从文件系统确定性生成。若有人改了章标题/
+      # 前置元数据/增删章却忘记重跑生成器，--check 会发现磁盘与生成结果不一致
+      # 并 BLOCK，提示重跑 `python3 tools/gen_indexes.py`。
+      run: python3 tools/gen_indexes.py --check
+      continue-on-error: false
+
+    - name: Density Audit (内容密度质量门禁)
+      # density_audit.py v3 门禁模式：扫描全书 147 章，计算 dim(认知密度)/depth(代码深度)
+      # 复合得分。avg < 20 或存在 shallow chapter (dim≥10 且 depth<8) 时 exit 1。
+      # 预防性门禁：若未来编辑因删节/软文化腿，降低书籍核心信息密度，CI 立即变红。
+      # 纯 Python 零依赖，<15s。
+      run: python3 tools/density_audit.py --check 20
+
+    - name: D5 Appendix Structure Audit (性能附录格式合规门禁)
+      # 校验所有含 D5 附录的章节：4-段结构 (D5.1 基准结果 / D5.2 非显然结论 /
+      # D5.3 可复现 demo / D5.4 方法论+xref)、标准区块引文
+      # "绝对毫秒随机器而变，加速比才是可移植信号。"、5-试验中位数约束。
+      # ERROR 级问题 (结构缺失/引文错误/非复现 demo) → exit 1 BLOCK。
+      # WARN 级 (模板偏离) 不阻断，仅报告。
+      run: python3 tools/d5_appendix_audit.py
+
+    - name: D5 Benchmark-Source Integrity Gate (基准源引用完整性 门禁)
+      # 首个语义层门禁：校验 D5 性能附录「基准源码见库根 `_bench_d5_X.cpp`」复现承诺。
+      # 每条声明须对应仓库根目录一个真实存在且 git 跟踪的 `_bench_d5_X.cpp`；
+      # 章含 D5 附录却漏标其基准源（孤儿缺口）即 BLOCK。防止「可复现性」承诺回归。
+      # 确定性、零依赖、围栏感知；纯 Python 秒级。
+      run: python3 tools/d5_source_integrity.py --check
+      continue-on-error: false
+
+    - name: Terminology Normalization Gate (术语/格式归一化 门禁)
+      # E10 收口：确定性门禁，强制全书术语拼写统一（架构名 x86-64 / ARM64、大写 C++）。
+      # 映射表见 tools/terminology_normalize.py（CONVENTIONS 第22/31行背书、散文感知、幂等）。
+      # 任何未来编辑若重新引入 x86_64 / AArch64 / aarch64 等异体拼写，CI 立即变红 BLOCK。
+      # 围栏代码 / 行内码 / 链接 URL / autolink 一律跳过，绝不改动代码、路径或 URL。
+      # 注：小写 c++NN 是 GCC 标志/路径/库名的正确字面量（CONVENTIONS 第152行 -std=c++23），
+      # 散文语言名已用大写 C++；故 c++ 不归一，避免破坏可编译命令与真实路径/库名。
+      run: python3 tools/terminology_normalize.py --check
+      continue-on-error: false
+
+    - name: D5 Coverage Scanner (D5 覆盖差距报告)
+      # 扫描缺少 D5 附录但含有性能信号的章节，按信号强度排序。
+      # 咨询模式：不阻断 CI，仅输出 build/d5_gap_report.json 供作者排期。
+      # 豁免 part01/part02/part14（历史/工具链/性能方法论章）+ 源码导读章。
+      run: python3 tools/d5_gap_scanner.py
+      continue-on-error: true   # 咨询模式：D5 覆盖是长期目标，不阻断每次提交
+
+    - name: Exercise Clone Guard (题库串章防回归门禁)
+      # 确定性门禁：提取每章"自测练习"小节的 ```cpp 块，归一化（去注释/预处理指令/
+      # 折叠空白）后哈希，若同一归一化块出现在 >=2 个不同章节，判为"题库串章"克隆
+      # 并 BLOCK。直接捕获通用模板题库（max_safe / std::integral 概念题 /
+      # constexpr fact / 泛型 max）被整体克隆进无关章的回归——无需 LLM、无 flake。
+      # 与 verify_exercises.py（仅编译练习块）互补：verify 保证"能编译"，本门禁
+      # 保证"不被克隆复用"。纯 Python 零依赖，秒级。
+      run: python3 tools/exercise_dup_guard.py
+      continue-on-error: false
+
+    - name: ASM Evidence Symbol Verify (汇编证据符号真实性门禁)
+      # 汇编/符号证据节真实性守卫：书内 ```asm 块若声明「节选自 Examples/X.asm」，
+      # 机器校验块内 mangled 符号集合 ⊆ 真实 Examples/X.asm 符号集合。任何未来编辑
+      # 若捏造/笔误符号（书有真实证据不存在的符号）→ DRIFT，CI 立即变红 BLOCK。
+      # 符号级校验（Itanium mangled 名跨 GCC 次版本稳定），纯 Python 零依赖、秒级。
+      # 与 book_asm_freshness（_asm_demo 围栏新鲜度）分工互补，不重叠。
+      run: python3 tools/verify_asm_evidence.py --root Book --examples Examples
+      continue-on-error: false
+
+    - name: Ensure binutils (c++filt/objdump)
+      # 书内 asm 围栏审计依赖 binutils 的 c++filt/objdump 解析 _asm_demo 工件
+      # （MinGW-w64 GCC15.3.0 产物，Linux binutils 可跨格式解析）。ubuntu-latest
+      # 默认预装 binutils；此处仅作防御性兜底。
+      run: command -v c++filt && command -v objdump || sudo apt-get install -y binutils
+
+    - name: Book ASM Freshness (书内 asm 围栏 vs 工件符号一致性)
+      # 与 consistency/compile 门禁并列：验证书内 asm 围栏展示的「用户 demo 函数」
+      # 仍定义于对应 GCC15.3.0 工件（_asm_demo/）。若某 demo 函数已不在工件定义中
+      # （版本漂移 / 复制错贴），判为真过期并 BLOCK 本 job，阻断发布。
+      # 工件为符号层面比对，不重编译，纯 Python + binutils，秒级完成。
+      run: python3 tools/book_asm_freshness.py
+      continue-on-error: false
+
+    - name: Dangling Chapter-Ref Lint (T1-2 悬空章节引用门禁)
+      # 扫描全书正文对「第N章 / chN」的引用，核对编号是否落在有效章节集合内。
+      # 2026-08-30 已清零 55 处悬空引用（映射见 docs/references/chapter_mapping.md），
+      # 由软门禁转硬：任何新增悬空引用即判红 BLOCK。
+      # 与 crossref_audit（part 级覆盖）/ xref_check（链接目标存在性）互补：
+      # 本门禁看的是 *编号* 层面的悬空，与链接路径解耦。
+      run: python3 tools/dangling_ref_linter.py --json outputs/t1_2_dangling.json
+      continue-on-error: false   # 硬门禁（2026-08-30 债务清零后转硬）
+
+    - name: Prerequisite Topology Check (T1-3 前置依赖拓扑门禁)
+      # 校验各章 `前置：` 元数据：前置编号 > 自身编号（拓扑倒置）或指向不存在
+      # 的章节（悬空前置）。2026-08-30 已清零（6 处前瞻导读列入 FORWARD_PRE_EXEMPT
+      # 白名单，悬空前置映射至现章），由软门禁转硬：新增异常即判红 BLOCK。
+      run: python3 tools/prereq_topo_check.py --json outputs/t1_3_topo.json
+      continue-on-error: false   # 硬门禁（2026-08-30 债务清零后转硬）
+
+    - name: Structure Defect Gate (S1 标题层级 / S5 参差表格 门禁)
+      # E6 收口（bf7a914）的结构缺陷扫描器常驻化：标题层级越级 / 参差表格一旦被
+      # 未来编辑重新引入，CI 立即变红 BLOCK，防止 E6 缺陷回归。围栏感知、零依赖。
+      run: python3 tools/structure_audit.py --check
+      continue-on-error: false
+
+    - name: Fence Integrity Sweep (围栏/诊断输出/HTML 注释 门禁)
+      # sweep_fences.py 常驻化：不平衡围栏 / 未围栏诊断输出 / 空围栏 / 裸 GCC
+      # linemarker 被当 H1 等结构缺陷一旦回归即 BLOCK。
+      run: python3 tools/sweep_fences.py --check
+      continue-on-error: false
+
+    - name: Whitespace Hygiene Gate (W1/W2/W3 门禁)
+      # E7 收口（e6fe145）的空白符卫生扫描器常驻化：行尾空格 / 连续空行 /
+      # 末尾换行一旦回归即 BLOCK，守住 MD009/MD012。
+      run: python3 tools/whitespace_fix.py --check
+      continue-on-error: false
+
+    - name: Mermaid Frontmatter Audit (图立场配色 门禁)
+      # 全部 Mermaid 图块须带 §4.1 统一 frontmatter（立场分层配色）；缺失即报告。
+      run: python3 tools/mermaid_audit.py
+      continue-on-error: true   # 初上线软门禁，观察一轮后转硬
+
+    - name: Table Style Audit (断表/列数不一致/误插> 门禁)
+      # §4.2 表格视觉规范常驻化：断表、列数不一致、表头与分隔行间误插 `>` 即报告。
+      run: python3 tools/table_style_audit.py
+      continue-on-error: true   # 初上线软门禁，观察一轮后转硬
+
+    - name: Verification Coverage Report (§10 验证链覆盖，咨询)
+      # 统计各章立场标签 / 验证标记覆盖度，标出「高风险章零标记」backlog。
+      # 咨询模式：不阻断，仅报告供作者排期（§10 合规是长期目标）。
+      run: python3 tools/verification_audit.py
+      continue-on-error: true
+
+    - name: §10 Verification Marker Gate (验证标记覆盖 门禁)
+      # E12 收口：半自动分诊把 147 活章全部补上 §10 验证标记（65 章据 D5/ASM 复现链
+      # 标 [VERIFIED]，8 章无复现链标 [UNVERIFIED]；审计清单 build/s10_audit.json）。
+      # 本门禁锁定该覆盖：任一「活章」(Book/partNN/chNN_*.md) 若缺 [VERIFIED]/[UNVERIFIED]/
+      # [NEEDS-VERIFY] 即 BLOCK，防未来编辑重新引入零标记章（§10 合规回归）。
+      # 刻意排除 _legacy/ 陈旧副本与 GLOSSARY/SUMMARY 等索引文件（非高风险断言载体）。
+      run: python3 tools/s10_verify_mark.py --check
+      continue-on-error: false
+
+    - name: Book Link Integrity Gate (正文跨章链接 前缀完整性)
+      # 2026-08-31 修复「Book/ 前缀链接在源码渲染器（GitHub/编辑器/mdBook）里全部
+      # 404」的结构性硬伤后，锁定防复发：正文 markdown 链接必须为源相对路径
+      # `](../partXX/chYY.md)`，任何重新引入的 `](Book/...)` 即 BLOCK。
+      # 裸文本 `⟶ Book/...` 引用除外（由 rewrite_links 构建期转链接，不在此列）。
+      run: python3 tools/fix_book_links.py --check
+      continue-on-error: false
+
+  # ---- 621 B3：并发安全静态检查（防止再次引入 gate∥replay 那类竞态）----
+  concurrency-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+    - name: Install pyyaml (checker 依赖)
+      run: python3 -m pip install --quiet pyyaml
+    - name: CI Concurrency Safety Check (写者先、读者后)
+      # 621 B3：静态解析本文件，识别「会重写 Examples/atoms/ 的写者 job」与
+      # 「读该目录 / 跑 gate_engine 的读者 job」，要求读者的 needs 闭包覆盖全部写者。
+      # 背景：619 验收的 2 条 BLOCK 是 replay（写）与 gate（读）并发导致的**误报**；
+      # 621 B1 给 gate 加 needs:[replay] 修复，B3 再把该不变量固化为门禁，
+      # 防止未来有人拆 job / 改依赖时把竞态重新引入。
+      # 注意：检查基于步骤文本匹配，非深度静态分析 ⇒ 通过 ≠ 绝对无竞态。
+      run: python3 tools/ci_concurrency_check_621.py
+      continue-on-error: false
+
+  # ── 508 任务2：三路并行 job（彼此无依赖，也不依赖 quality；无 matrix ⇒ 不涉 fail-fast）──
+  # 拆分依据：原 quality job 有 36 步串行（实测正常 <5min，但重步"Evidence Replay / Gate+S1-S6 /
+  # Pytest"占了其中大部分 wall，且与其余 34 步**无数据依赖**）。提取为独立 job 后四者可并行。
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+    - name: Pytest (xdist 并行 · 工具链回归测试)
+      # 工具链的单元测试：锁定真实发生过的回归（git() 非 UTF-8 崩溃、patch_blocks stale-span、
+      # triage 路径分隔符、run_expected PATH 注入、gen_metrics 行尾伪 diff、star_h2 分类）。
+      # 新增工具请补对应测试。
+      # 508 任务1/2：走 pytest-xdist（CI 钉 `-n 16`，与本地 pyproject addopts 的 `-n auto` 口径一致）。
+      # 本机实测 366 点 wall 227s → 147.9s。CI 钉 16 而非 auto：runner 通常 2-4 核，且
+      # replay/gate job 会同时抢 CPU。
+      # 失败可读性：job 日志下载需 admin（实测 API 403），故把失败摘要输出为 **error 注解**
+      # （经 check-runs /annotations 端点可公开读取）。
+      run: |
+        python3 -m pip install --quiet pytest pytest-xdist pyyaml hypothesis
+        rc=0
+        # 两阶段（508 实测结论）：纯逻辑并行、共享真实仓库状态的串行。
+        # 为何不直接 `-n 16` 全量：~14 个模块共享 replay 全局锁与 Examples/atoms 工件，
+        # 并发会报 `replay 锁被占用超时`；xdist 的 `--dist loadgroup` 分组实测无效
+        # （同组测试仍散在多 worker），故改用"按 marker 切分"这一不依赖分组的方案。
+        python3 -m pytest tests/ -q -m "not slow" -n 16 --maxfail=1 2>&1 | tee /tmp/pytest.log
+        [ "${PIPESTATUS[0]}" = "0" ] || rc=1
+        python3 -m pytest tests/ -q -m slow -n0 2>&1 | tee -a /tmp/pytest.log
+        [ "${PIPESTATUS[0]}" = "0" ] || rc=1
+        if [ "$rc" != "0" ]; then
+          cat /tmp/pytest.log >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r ln; do printf '::error::%s\n' "$ln"; done < <(tail -n 40 /tmp/pytest.log)
+          exit 1
+        fi
+      continue-on-error: false
+
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0   # 增量/变更判定需要完整 git 历史与 origin/<base> 引用
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+    - name: Evidence Replay (证据卡机器复算：工件同代 / 输出逐字 / sanitizer)
+      # 契约见 docs/kernel/M2_empirical.md §1：任一 refute 即 exit 1。
+      # 核心校验 artifact_sha：重生成工件后必须与卡同代——"工件过期"由此从人工发现变机器拦截。
+      # 跨编译器分流（2026-09-10 修 CI 红因）：sha 只在**同一编译器（含平台）**下可复算，本步在
+      # Ubuntu 系统 g++ 上跑，与卡归属的 MinGW GCC 15.3 字节天然不同 → 工具自动改判
+      # `artifact_assert[]` 结构断言（断言缺失/不满足仍红），故本步在 CI 是**真实校验**而非跳过。
+      # 失败时的可读性：本仓库 job 日志下载需 admin 权限（实测 API 403）→ 把失败日志再输出为
+      # **error 注解**（check-runs /annotations 端点可公开读取，无 admin 也能定位红因）。
+      run: |
+        # 508 任务3：**默认增量**，`tools/` 有变更时回退**全量**（--rebuild-manifest）。
+        # 依据：498 的增量指纹 = sha256(卡‖fixture‖artifact)，**不含 tools/ 代码本身**——
+        # 若改了 replay/规则工具却仍走增量，旧清单的"已确认"结论就不再可信（换了裁判却没重赛）。
+        # 基准取 origin/<base>：PR 用 base 分支，push 无 base_ref 则回退 master。
+        base="origin/${GITHUB_BASE_REF:-master}"
+        git fetch --no-tags --quiet origin "$base" 2>/dev/null || true
+        if git diff --name-only "$base"...HEAD 2>/dev/null | grep -q '^tools/'; then
+          echo "::notice::tools/ 有变更 ⇒ 全量 replay（--rebuild-manifest）"
+          python3 tools/atom_evidence_replay.py --check --rebuild-manifest 2>&1 | tee /tmp/replay.log
+        else
+          echo "::notice::tools/ 无变更 ⇒ 增量 replay（--incremental）"
+          python3 tools/atom_evidence_replay.py --check --incremental 2>&1 | tee /tmp/replay.log
+        fi
+        rc="${PIPESTATUS[0]}"
+        if [ "$rc" != "0" ]; then
+          cat /tmp/replay.log >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r ln; do printf '::error::%s\n' "$ln"; done < <(head -n 30 /tmp/replay.log)
+          exit 1
+        fi
+      continue-on-error: false
+
+  gate:
+    # 621 B1：**并发安全** —— gate 必须等 replay 跑完再启动。
+    # 根因：replay 的 recompile 会「删旧写新」重写 Examples/atoms/*.asm（如
+    # _atom_lock_cost.asm），而 gate 的 EV-ARTIFACT-FILE-EXISTS 要读同一批工件。
+    # 两者并行时，gate 可能采样到「删旧未写新」的中间窗口 ⇒ 报出**假的** BLOCK
+    # （619 验收的 2 条 BLOCK 误报即由此而来，620 任务1 已定位并证伪）。
+    # 故让 gate 依赖 replay：replay 写完后 gate 才读，读到的一定是最终状态。
+    # 注意：不要反向（replay needs gate）——那样 replay 会在 gate 判定之后继续改工件，
+    # gate 的结论立刻失效。方向必须是「写者先、读者后」。
+    needs: [replay]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: Install gate tool dependencies (pyyaml / hypothesis)
+      # gate_engine.py 顶层 import yaml；ubuntu-latest 裸 python3 不含 pyyaml，会致
+      # gate_engine --check ModuleNotFoundError 静默 exit 1（#624 gate job 仍红根因）。
+      # 显式安装，与 pytest job 口径一致。
+      run: python3 -m pip install --quiet pyyaml hypothesis
+      continue-on-error: false
+
+    - name: Gate Engine (M4 规则引擎：事实门禁 block + 双清单收敛)
+      # 规则全集见 docs/kernel/M4_gate_engine.md；block 级违规即红，warn 记债不红，
+      # advice（教学/文学）只建议不改文。规则可实现按 ADR-0004 挂在 cmd_check 上。
+      run: python3 tools/gate_engine.py --check
+      continue-on-error: false
+
+    - name: S1-S6 Controls (黄金锁 / 债务台账 / 毒样例演练)
+      # S4 黄金锁：质量指标恶化即红（改善提示 sync）；S5 债务台账：豁免到期/负债率超限即红；
+      # S6 毒样例演练：注入假论断/过期工件/缺反例，制衡层必须全部拦截（阴性对照必须放行）。
+      run: |
+        python3 tools/golden_lock.py check --no-replay  # CI 跨平台：跳过 replay 真编译指标（.exe/路径差异）
+        python3 tools/debt_ledger.py check
+        python3 tools/poison_drill.py
+      continue-on-error: false
+
+  compile:
+    # 508 任务2：compile/publish-check 的下游依赖从「仅 quality」扩为「四个并行门禁 job」——
+    # 保证任一门禁（含新拆出的 pytest/replay/gate）失败时，编译与 deploy 链路照样被拦住
+    # （原链路 quality→compile→site/pdf/epub→deploy 的"任一硬门禁失败即不部署"语义不变）。
+    needs: [quality, pytest, replay, gate]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            version: '15'
+            name: 'GCC-15'
+          - compiler: clang
+            version: '19'
+            name: 'Clang-19'
+    name: Compile (${{ matrix.name }})
+
+    # 钉 GCC 15.3.0 容器：asm 证据基线(Examples/*.asm)由 mingw1530 GCC 15.3.0
+    # 生成；compile_exempt.json 的豁免清单是在 gcc-15.3.0 主版本下审计的。
+    # 用官方面定镜像而非 PPA(ppa:ubuntu-toolchain-r/test)，避免浮动 15.x 漂移
+    # 致豁免漏覆盖、Compile Gate 误报回归（见 #280 全红：PPA 在两次运行间换了
+    # 微版本，无需改内容即让 gate 失败）。仅 GCC 矩阵用容器；Clang 矩阵保持
+    # runner 默认（clang 仅交叉验证，门禁为 continue-on-error）。
+    #
+    # 2026-08-31 起额外钉 digest：tag 可被强制重推，digest 不可。digest 取自
+    # Docker Hub 官方 API（2026-08-25 快照，多架构 manifest list，12 个平台）：
+    #   https://hub.docker.com/v2/repositories/library/gcc/tags/15.3.0
+    # 写法说明：GH Actions 用 `gcc@sha256:`（digest 替代 tag），而 Dockerfile
+    # 用 `gcc:15.3.0@sha256:`（tag+digest，docker 两种都收）。升级时两处都要改。
+    container: ${{ matrix.compiler == 'gcc' && 'gcc@sha256:8f59ba4bd41dced92b4ab1c0290ae4a6719d286c936f4d25ff75cb689c7c63fe' || null }}
+
+    steps:
+    - name: Provision git + python3 in GCC container
+      # 官方 gcc:15.3.0 镜像是 Debian-slim，不含 git/python3；而 actions/checkout
+      # 与全部 python3 tools/* 步骤都依赖它们。容器以 root 运行且带 apt，故先装。
+      # Clang 矩阵在 runner 上（container=null），runner 自带 git/python3，跳过。
+      if: matrix.compiler == 'gcc'
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends git python3
+
+    - uses: actions/checkout@v7
+
+    - name: Assert GCC toolchain version (钉 15.3.0，漂移即硬失败)
+      if: matrix.compiler == 'gcc'
+      # 仅校验主版本 == 15 仍不足（#280 已证：PPA 两次运行给出不同 15.x 微版本，
+      # 豁免漏覆盖即 gate 误红）。既然已钉 gcc:15.3.0 容器，这里强制补丁版本也 == 15.3.0：
+      # 不符即硬失败（绝不让"能编过但和证据基线语言前端不一致"的影子通过）。
+      run: |
+        ver=$(g++ --version | head -1)
+        echo "GCC version: $ver"
+        if ! echo "$ver" | grep -q "15.3.0"; then
+          echo "::error::GCC 为 $ver，期望精确 15.3.0（asm 证据基线 / compile_exempt.json 审计基准）。容器镜像应固定为 gcc:15.3.0。"
+          exit 1
+        fi
+        echo "GCC 版本达成 15.3.0，与证据基线一致。"
+
+    - name: Install Clang
+      if: matrix.compiler == 'clang'
+      continue-on-error: true   # 交叉验证性质；即便 LLVM 源临时不可用也别让整 job 因基础设施红
+      run: |
+        # Clang-19 是当前 LLVM 稳定版，C++23 支持完备（<print>/<expected>/<format>）
+        # 改用 apt.llvm.org 官方源手动安装：llvm.sh 在 ubuntu-24.04 runner 上
+        # 因 GPG/apt-key 弃用与依赖问题常安装失败，导致本 job 整 job 红。
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release software-properties-common
+        sudo wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+        echo "deb http://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-19 main" | sudo tee /etc/apt/sources.list.d/apt.llvm.org.list
+        sudo apt-get update
+        sudo apt-get install -y clang-19
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-19 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 100
+        g++ --version | head -1
+
+    - name: Compile Audit (隔离块语法检查 · T2 增量优先)
+      # --main-only 仅验证含 int main 的完整程序；设计性豁免（多文件工程/
+      # 模块/MSVC/POSIX 专属/外部库/故意错误·UB/跨块增量）由 compile_gate
+      # 依据 tools/compile_exempt.json 放行，避免误伤。
+      # Clang 矩阵以 g++ 别名调用 clang++-19，C++23 支持完备但诊断风格
+      # 与 GCC 有差异，初期 continue-on-error 观察基线。
+      # T2 增量门禁：默认只编译 git 变更的 Book/*.md（秒级），无变更自动回退全量；
+      # `||` 兜底：若增量路径因异常（如 git 不可达）未能产出可用报告，则全量重跑，
+      # 保证编译防回归门禁永不直接跳过。
+      run: python3 tools/cppbible.py compile --changed --parallel || python3 tools/cppbible.py compile --full --parallel
+      continue-on-error: ${{ matrix.compiler == 'clang' }}
+
+    - name: Compile Gate (防回归门禁)
+      # 未来任何编辑若引入新的 SYNTAX/TYPE_MISMATCH 内容 bug，CI 立即变红；
+      # 已知豁免不阻断。门禁失败则本 job 失败，阻断后续发布任务。
+      # Clang 矩阵下设为 continue-on-error（GCC 是主编译器，Clang 仅供交叉验证）。
+      continue-on-error: ${{ matrix.compiler == 'clang' }}
+      run: python3 tools/compile_gate.py
+
+    - name: Exempt Audit (编译豁免有效性门禁)
+      # 闭合 compile_gate 的死角: compile_gate 只比对"当前失败块 vs 豁免清单",
+      # 从不反查豁免是否仍成立。本步用相同命令 (g++ -std=c++23 -O0 -fsyntax-only)
+      # 重编 65 条豁免, 检测三类翻转:
+      #   DRIFT  = INTENTIONAL_ERROR 块竟能编过 (正文"会报错"已成谎言, 内容漂移) -> 阻断
+      #   MISSING= 章节编辑致 block 号漂移, 豁免指向错块/越界 -> 阻断
+      #   STALE  = 其余 reason 块突然能编过 (豁免失效, 可清理) -> 默认 WARN
+      # 仅编 65 块, 秒级。gcc-15 与基线(mingw/Windows gcc-15.3.0)同 GCC C++ 前端,
+      # 核心语言错误两平台判定一致, 无跨平台误报; POSIX 类平台差异仅映射为 STALE(WARN)。
+      continue-on-error: false
+      run: python3 tools/exempt_audit.py --check
+
+    - name: D5 Benchmark Compile Gate (基准源码真能编译/链接 门禁)
+      # E11 收口：深化 E9「基准源存在 + 被 git 跟踪」→「基准源在 GCC 15.3.0
+      # -std=c++23 下真能编译并链接」。复现性承诺最硬一档：读者抄走的
+      # _bench_d5_X.cpp 至少能在现代标准 + 优化下编过、链过、跑起来。
+      # 115 个基准中 4 个直接用 <windows.h>（WIN_ONLY），非 Windows runner
+      # 自动跳过；其余 111 个在 gcc:15.3.0 下编过 + 链过（链接常驻 -latomic，
+      # 128-bit std::atomic 所需；-lwinmm 仅 Windows）。仅 GCC 矩阵跑——与
+      # asm 证据基线同语言前端，避免 Clang 诊断差异致误红。
+      if: matrix.compiler == 'gcc'
+      continue-on-error: false
+      run: python3 tools/d5_compile_gate.py --check
+
+    - name: D5 Benchmark Runtime Gate (基准真能运行 门禁)
+      # E13 收口：深化 E11「能编译 + 链接」→「真能运行且不崩」。编过 + 链过 ≠
+      # 运行不崩：一个能链接却运行时 segfault / 死循环的基准是空头承诺。
+      # 每基准带超时(30s)执行，判定分级：
+      #   - 异常终止(signal / NTSTATUS 0x8xxxxxxx 如 0xC00000FD 栈溢出) → CRASH(判红)
+      #   - 退出码非 0 但有正常产出(典型：main 误 return 测量值)          → BENIGN_RET(WARN)
+      #   - 超时 / 退出 0 但无产出                                        → WARN
+      #   - 退出 0 且有产出                                               → PASS
+      # 运行时具非确定性（机器负载/基准设计长跑），故 continue-on-error 软门禁，
+      # 不阻断发布但把崩溃显性暴露供作者复核（与 T1-1 运行期门禁同策略）。
+      # 仅 GCC 矩阵跑（同 E11 平台对齐）；个别基准(如 ch101 递归4万需扩栈)经
+      # EXTRA_LINK_FLAGS 追加 -Wl,--stack,33554432，harness 缺陷不归咎源。
+      if: matrix.compiler == 'gcc'
+      continue-on-error: true
+      run: python3 tools/d5_runtime_gate.py --timeout 30
+
+    - name: JSON Project Gate (贯穿项目线·手写 JSON 库编译+运行门禁)
+      # 台阶二收口：把 Examples/json/ 贯穿项目纳入门禁——编译并运行 json_test.cpp
+      # （84 例自测）与 json_demo.cpp（配置读→查→改→回写），验证 JSON 库「可编译、
+      # 可测、可运行」。未来任何编辑若破坏 JSON 库（类型三元组分流 / Unicode 转义 /
+      # 大整数精度 / 幂等往返），CI 立即变红 BLOCK。编译器路径走 toolchain.toml 唯一
+      # 事实源（Linux runner 回退 PATH g++），与 d5_compile_gate 同平台语义。
+      # 仅 GCC 矩阵跑——与 asm 证据基线同 GCC 前端，避免 Clang 诊断差异致误红。
+      if: matrix.compiler == 'gcc'
+      continue-on-error: false
+      run: python3 tools/json_project_gate.py --check
+
+    - name: Compile + Link + Run + Sanitizer (T1-1 运行期门禁)
+      # 对自包含 main 块做完整 编译+链接+运行， 并叠加 ASan/UBSan/TSan。
+      # 现有 compile_all/compile_gate 仅作 *语法级* 静态检查（-fsyntax-only）；
+      # 本步补充 *运行期* 验证：“能编译”≠“能跑对”。在 Linux 运行器下 GCC-15
+      # 具备完整 sanitizer 运行时与 std::print/threading 支持（本地 MinGW 15.3.0
+      # 存在 std::print 链接缺口与 winpthreads 线程崩溃缺陷，T1-1 于本地做
+      # toolchain-skip 降级，见 compile_run_sanitize_pipeline.py）。
+      # --chapter-context 让教学书“增量式定义”的同章前向引用不误判为失败。
+      # --changed 仅编译 git diff 变更的章节（CI 在 fetch-depth:0 下有完整历史，
+      # fallback 到 HEAD~1..HEAD）。初期 continue-on-error 观察全书基线；
+      # 固化后可去掉本标记。如需全量扫描，用 --all-run。
+      run: python3 tools/compile_run_sanitize_pipeline.py --changed --chapter-context
+      continue-on-error: true
+
+    - name: Assertion Claims Verification (书内声明契约门禁)
+      # 把书内 static_assert / assert() 当作单元测试跑, 验证"文档声明为真"。
+      # 修复前版本运行期不检查返回码 (subprocess.run 默认不抛异常), 导致验证
+      # 形同虚设 (无论 assert 是否成立都报 PASS); 现版:
+      #   返回码非零 + 非 SIGILL  -> FAIL (书声明错误, 阻断)
+      #   故意失败演示 (EXPECTED_FAIL 白名单, 如 ch46 LSP 违反示例) -> DEMO (不阻断)
+      #   SIGILL (CI runner 无 AVX512 却编译了 -mavx512f 的 SIMD 块) -> WARN (环境限制)
+      #   隔离伪影 (片段引用前文未定义符号) -> WARN (非独立可编译, 不计入书 bug)
+      # 仅 FAIL 阻断门禁; WARN/DEMO 不阻断。--gcc g++ 用本 job 装的 gcc-15。
+      continue-on-error: false
+      run: python3 tools/run_cpp_assertions.py --gcc g++
+
+  # ---- 发布门禁：链接/资产自检（左移，~15s 捕获「复报错」类断链）----
+  publish-check:
+    needs: [quality, pytest, replay, gate]   # 508 任务2：同 compile，见上方注释
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: Rewrite links + self-validate (site & pdf)
+      # 发布管线门禁：rewrite_links 重写跨章链接后会自检 site/pdf 产物的
+      # 图片/链接存在性与 nav 覆盖，断裂即退出码 1。放在 site/pdf/epub
+      # 重型构建之前，~15s 左移捕获「断链致 mkdocs --strict / pandoc 失败」，
+      # 根治「rewrite_links 复报错」——曾因只修 site 漏 pdf 致 pdf/epub 仍红。
+      run: |
+        python3 tools/rewrite_links.py --mode site
+        python3 tools/rewrite_links.py --mode pdf
+
+  # ---- 发布：静态站点（MkDocs Material）----
+  site:
+    needs: [compile, publish-check]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: Install MkDocs stack (locked)
+      # 从 uv 导出的 requirements.lock.txt 安装，保证本地与 CI 依赖一致、可复现
+      # （生成：uv export --no-emit-project --extra dev --extra ci --extra pdf -o requirements.lock.txt
+      #   --no-emit-project 必须保留：pip 哈希校验模式与 `-e .` 不兼容，含 editable 行必装失败）
+      run: pip install -r requirements.lock.txt
+
+    - name: Rewrite cross-chapter links (site)
+      run: python3 tools/rewrite_links.py --mode site
+
+    - name: Generate nav & config
+      run: python3 tools/gen_mkdocs_nav.py
+
+    - name: Build site
+      run: mkdocs build --strict --config-file build/site/mkdocs.yml
+
+    - name: Index full-text search (PageFind, CJK)
+      # PageFind extended 二进制原生支持中日文分词；对 build/site_out 静态产物建索引，
+      # 生成 build/site_out/pagefind/（含 pagefind-ui.js / pagefind-ui.css）。
+      # pagefind 已含在锁定文件，无需单独安装。
+      run: python3 -m pagefind --site build/site_out
+
+    - name: Site front-end health audit
+      # 前端产物自检：首页/章节页可达/资源完整性/徽章注入/Mermaid/pagefind 索引，
+      # 任一失败即阻断上传与部署（tools/site_audit.py，零依赖）。
+      run: python3 tools/site_audit.py build/site_out
+
+    - name: Upload site artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: cpp-bible-site
+        path: build/site_out
+        retention-days: 14
+
+    - name: Upload Pages artifact
+      uses: actions/upload-pages-artifact@v5
+      with:
+        path: build/site_out
+
+  # ---- 发布：全书 PDF（pandoc + xelatex + mermaid）----
+  pdf:
+    needs: [compile, publish-check]
+    runs-on: ubuntu-latest
+    env:
+      # GitHub Actions Linux runner 以 root 运行且无可用的 Chromium sandbox，
+      # mermaid-filter 1.4.x 调 mermaid-cli(mmdc) 渲染 Mermaid 图会因 Chromium
+      # 启动失败而 FATAL 退出（exit 83）。mermaid-filter 只认
+      # MERMAID_FILTER_PUPPETEER_CONFIG 指向的 puppeteer 配置文件，把
+      # --no-sandbox 写进该 JSON 的 args，再由 mmdc -p 透传给 puppeteer.launch()。
+      # （注意：PUPPETEER_ARGS 在本版本不生效，必须用配置文件方式。）
+      MERMAID_FILTER_PUPPETEER_CONFIG: ${{ github.workspace }}/.puppeteer.json
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: Install pandoc / xelatex / CJK fonts
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pandoc texlive-xetex texlive-lang-chinese fonts-noto-cjk fonts-noto-cjk-extra
+
+    - name: Install mermaid-filter
+      run: npm install -g mermaid-filter
+
+    - name: Install Chromium libs for mermaid-filter (best-effort)
+      # mermaid-filter 的 puppeteer Chromium 在 ubuntu runner 上常因缺系统库启动崩溃；
+      # 补装常见依赖以尽量保留 Mermaid 矢量图。失败不阻断——generate_pdf.sh 已对
+      # mermaid 渲染崩溃降级为纯代码块，保证 PDF 始终产出。
+      continue-on-error: true
+      run: sudo apt-get update && sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 libx11-6 libxcb1 || true
+
+    - name: Build PDF (by-part 分卷，避免 xelatex 超时)
+      run: bash tools/generate_pdf.sh --by-part
+
+    - name: Upload PDF artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: cpp-bible-pdf
+        path: build/pdf/part*.pdf
+        retention-days: 14
+
+    # Build PDF 失败时，普通 artifact step 会被跳过，导致 *.pandoc.err 从不保留、
+    # 真实 xelatex 报错无从追溯。always() 无条件上传错误日志以打破该黑盒。
+    - name: Upload PDF error logs (always)
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: cpp-bible-pdf-err
+        path: build/pdf/*.pandoc.err
+        if-no-files-found: ignore
+        retention-days: 14
+
+  # ---- 发布：全书 EPUB（pandoc epub3）----
+  epub:
+    needs: [compile, publish-check]
+    runs-on: ubuntu-latest
+    env:
+      # 复用 pdf job 的 puppeteer 配置，让 mermaid-filter 在 CI 无沙箱环境渲染 Mermaid 为 SVG 嵌入 EPUB
+      MERMAID_FILTER_PUPPETEER_CONFIG: ${{ github.workspace }}/.puppeteer.json
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    - name: Install pandoc
+      run: sudo apt-get update && sudo apt-get install -y pandoc
+
+    - name: Install mermaid-filter
+      run: npm install -g mermaid-filter
+
+    - name: Install Chromium libs for mermaid-filter (best-effort)
+      # 同 pdf job：补装 Chromium 系统库以尽量保留 Mermaid 矢量图；失败不阻断——
+      # generate_epub.sh 已对 mermaid 渲染崩溃降级为纯代码块，保证 EPUB 始终产出。
+      continue-on-error: true
+      run: sudo apt-get update && sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 libx11-6 libxcb1 || true
+
+    - name: Generate EPUB (by-part 分册，防 OOM)
+      # 根因（2026-08-30 WSL 7.4GB 复现实测）：全书 combined.md 13MB，单本 pandoc
+      # --split-level=1 峰值内存 >7GB，被 OOM Killer 杀死（步骤显示 cancelled）。
+      # 分册与 pdf job 的 --by-part 对称，本地 16 册全部生成成功。
+      run: |
+        set -euo pipefail
+        mkdir -p build
+        set +e
+        bash tools/generate_epub.sh --by-part 2>&1 | tee build/epub_gen.log
+        rc=${PIPESTATUS[0]}
+        echo "generate_epub.sh exit=$rc"
+        exit $rc
+
+    - name: Upload EPUB diagnostic log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: epub-diag
+        path: build/epub_gen.log
+        retention-days: 7
+        if-no-files-found: ignore
+
+    - name: Upload EPUB artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: cpp-bible-epub
+        path: build/epub/part*.epub
+        retention-days: 14
+
+  # ---- 发布：GitHub Pages 部署（site + PageFind 索引）----
+  deploy:
+    needs: [site, pdf, epub]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v5
